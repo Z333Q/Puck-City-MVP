@@ -1,0 +1,24 @@
+import React from 'react';
+import { BrowserRouter as Router, Route, Switch } from 'react-router-dom';
+import AdminDashboard from './components/AdminDashboard';
+import BuyTokens from './components/BuyTokens';
+import Introduction from './components/Introduction';
+import SignUp from './components/Signup';
+import SupportTeam from './components/SupportTeam';
+
+function App() {
+  return (
+    <Router>
+      <Switch>
+        <Route path="/" exact component={Introduction} />
+        <Route path="/signup" component={SignUp} />
+        <Route path="/buy-tokens" component={BuyTokens} />
+        <Route path="/support-team" component={SupportTeam} />
+        <Route path="/admin-dashboard" component={AdminDashboard} />
+      </Switch>
+    </Router>
+  );
+}
+
+export default App;
+
