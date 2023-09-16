@@ -5,3 +5,4 @@ const contractAddress = "YOUR_CONTRACT_ADDRESS";  // Replace with your deployed 
 const contractInstance = new web3.eth.Contract(PuckCity.abi, contractAddress);
 
 export default contractInstance;
+
