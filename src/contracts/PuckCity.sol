@@ -9,11 +9,19 @@ import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+
+
 import "https://github.com/Immutable-X/imx-contracts/blob/master/contracts/ERC20.sol";
 import "https://github.com/maticnetwork/pos-portal/contracts/root/RootChainManager.sol";
 
-contract PuckCity is ERC20, ERC1155, Ownable, Pausable, ReentrancyGuard, ChainlinkClient {
-    // Constants
+contract PuckCity is ERC20, ERC1155, Ownable, Pausable, ReentrancyGuard, ChainlinkClient, Initializable, AccessControl {
+        using Counters for Counters.Counter;
+
+// Constants
+    uint256 private constant GAMES_IN_SEASON = 82;
     uint256 private constant TEAM_COUNT = 32;
     uint256 private constant TOKENS_PER_TEAM = 1000;
     uint256 private constant PERCENT_MULTIPLIER = 1000; // For 0.5% transaction fee
@@ -23,7 +31,8 @@ contract PuckCity is ERC20, ERC1155, Ownable, Pausable, ReentrancyGuard, Chainli
     uint256 public unstakeFee = 50; // 5%
  uint256 public totalRevenueFromTransactionFees = 0; 
     uint256 public totalRevenueFromClaimFees = 0;
-
+// Define new roles
+    bytes32 public constant GAME_ADMIN_ROLE = keccak256("GAME_ADMIN_ROLE");
 
     // State variables
     bytes32 public jobId;
@@ -31,8 +40,8 @@ contract PuckCity is ERC20, ERC1155, Ownable, Pausable, ReentrancyGuard, Chainli
 
     uint256 public transactionFee = 5; // 0.5%
     uint256 public globalTreasury;
-    uint256 public totalWins;
-    uint256 public totalLosses;
+Counters.Counter private _totalWins;
+uint256 public totalLosses;
     uint256 public totalPlayoffTeams;
     uint256 public totalEliminatedTeams;
     uint256 public playoffDemandFactor;
@@ -57,37 +66,47 @@ contract PuckCity is ERC20, ERC1155, Ownable, Pausable, ReentrancyGuard, Chainli
     address private oracle;
     uint256 private fee;
 
-    struct GameResult {
-        uint256 homeScore;
-        uint256 awayScore;
-        bool resultSubmitted;
-        bool teamMadePlayoff;
-        bool teamEliminated;
+struct GameResult {
+    uint32 homeScore;
+    uint32 awayScore;
+    bool resultSubmitted;
+    bool teamMadePlayoff;
+    bool teamEliminated;
+}
+
+// struct to encapsulate oracle details for cleaner code
+    struct OracleDetails {
+        bytes32 jobId;
+        uint256 fee;
+        address oracleAddress;
     }
 
+    OracleDetails public oracleDetails;
+
     modifier onlyOracle() {
-        require(msg.sender == oracle, "Caller is not the oracle");
+        require(msg.sender == oracleDetails.oracleAddress, "Caller is not the oracle");
         _;
     }
 
-    // Constructor to initialize the contract with necessary parameters
-    constructor(
-        address[] memory _teamTreasuryAddresses,
-        string memory _uri,
-        address _priceFeedAddress,
-        address _immutableXAddress,
-        address _rootChainManagerAddress,
-        bytes32 _jobId,
-        uint256 _oraclePaymentAmount,
-        address _oracle,
-        bytes32 _chainlinkJobId,
-        uint256 _chainlinkFee
-    ) ERC20("Puck City", "PUCK") ERC1155(_uri) {
-        require(_teamTreasuryAddresses.length == TEAM_COUNT, "Invalid team treasury addresses length");
-        
-        for (uint256 i = 0; i < TEAM_COUNT; i++) {
-            teamTreasury[i] = _teamTreasuryAddresses[i];
-        }
+
+    // Initialize the contract with necessary parameters
+function initialize(
+    address[] memory _teamTreasuryAddresses,
+    string memory _uri,
+    address _priceFeedAddress,
+    address _immutableXAddress,
+    address _rootChainManagerAddress,
+    bytes32 _jobId,
+    uint256 _oraclePaymentAmount,
+    address _oracle,
+    bytes32 _chainlinkJobId,
+    uint256 _chainlinkFee
+) public initializer {
+    require(_teamTreasuryAddresses.length == TEAM_COUNT, "Invalid team treasury addresses length");
+
+    // Initialize ERC20 and ERC1155
+    ERC20.__ERC20_init("Puck City", "PUCK");
+    ERC1155.__ERC1155_init(_uri);
         
         priceFeed = AggregatorV3Interface(_priceFeedAddress);
         immutableX = IERC20(_immutableXAddress);
@@ -125,29 +144,31 @@ contract PuckCity is ERC20, ERC1155, Ownable, Pausable, ReentrancyGuard, Chainli
         return globalTreasury - tradingVolume;
     }
 
-    // Internal function to calculate the price
-// ... [Previous Calculations]
-    function _calculatePrice(uint256 tradingVolume, uint256 reserveBalance) internal view returns (uint256) {
-        uint256 winRatio = (totalWins * BASE * BASE) / (totalWins + totalLosses);
-        uint256 reserveRatio = (reserveBalance * BASE) / tradingVolume;
-        uint256 demandFactor = 1 + playoffDemandFactor * totalPlayoffTeams / TEAM_COUNT - eliminationDemandFactor * totalEliminatedTeams / TEAM_COUNT;
-        return (tradingVolume * winRatio * reserveRatio * demandFactor) / (BASE * BASE);
-    }
-// New calculations based on token dynamics
-        uint256 TF = transactionFee;  // Transaction fee
-        uint256 CF = unstakeFee;      // Claim fee (was called unstakeFee before)
-        uint256 TR = totalRevenueFromTransactionFees;
-        uint256 CR = totalRevenueFromClaimFees;
-        uint256 Gm = 82;  // Games in a season
-        uint256 Tm = Gm * TEAM_COUNT; // Assuming playoffs operate in seperate contract for simplification
+    // Function to calculate the price
+       function _calculatePrice(uint256 tradingVolume, uint256 reserveBalance) internal view returns (uint256) {
+        uint256 totalSupplyCached = totalSupply();  // Cache totalSupply for gas optimization
+        uint256 winRatio = _getWinRatio();
+        uint256 reserveRatio = _getReserveRatio(reserveBalance);
+        uint256 demandFactor = _getDemandFactor();
+        uint256 feeFactor = _getFeeFactor();
+        uint256 treasuryTransactionFactor = _getTreasuryTransactionFactor();
 
-        uint256 price = (tradingVolume / totalSupply()) * (totalWins / (totalWins + totalLosses)) * (reserveBalance / TEAM_COUNT)
-                      * (1 + playoffDemandFactor * totalPlayoffTeams / TEAM_COUNT - eliminationDemandFactor * totalEliminatedTeams / TEAM_COUNT)
-                      * (1 + TF * TR / totalSupply() + CF * CR / totalSupply()) * (1 + TF * Tm / Gm);
+        uint256 price = (tradingVolume * BASE / totalSupplyCached)
+                      * winRatio
+                      * reserveRatio
+                      * demandFactor
+                      * feeFactor
+                      * treasuryTransactionFactor
+                      / (BASE * BASE * BASE * BASE * BASE);  // Dividing by BASE^5 to correct for the five multiplications above
 
         return price;
     }
     // Function to purchase tokens
+/**
+ * @notice Purchase tokens for a specific team.
+ * @param _amount The amount of tokens to purchase.
+ * @param _teamId The ID of the team for which to purchase tokens.
+ */
     function purchaseToken(uint256 _amount, uint256 _teamId) public payable whenNotPaused nonReentrant {
         require(_amount > 0 && _amount <= TOKENS_PER_TEAM, "Invalid amount");
         require(_teamId < TEAM_COUNT, "Invalid team ID");
@@ -216,8 +237,7 @@ contract PuckCity is ERC20, ERC1155, Ownable, Pausable, ReentrancyGuard, Chainli
     }
     // Migrate ERC20 tokens to Polygon
     function migrateERC20ToPolygon(uint256 _amount) public onlyOwner {
-        (bool success,) = address(rootChainManager).call{value: _amount}("");
-        require(success, "Transfer to Polygon failed");
+        require(address(rootChainManager) != address(0), "Invalid rootChainManager address");
         rootChainManager.depositERC20(address(immutableX), msg.sender, _amount);
     }
 
@@ -264,7 +284,7 @@ contract PuckCity is ERC20, ERC1155, Ownable, Pausable, ReentrancyGuard, Chainli
         });
 
         if (_homeScore > _awayScore) {
-            totalWins++;
+            _totalWins.increment();
         } else {
             totalLosses++;
         }
@@ -279,6 +299,50 @@ contract PuckCity is ERC20, ERC1155, Ownable, Pausable, ReentrancyGuard, Chainli
 
         lastResultUpdateBlock = block.number;
         emit GameResultUpdated(_teamId, _gameId, _homeScore, _awayScore);
+    }
+// Helper function to get win ratio: W / (W + L)
+    function _getWinRatio() internal view returns (uint256) {
+        return (totalWins * BASE * BASE) / (totalWins + totalLosses);
+    }
+
+    // Helper function to get reserve ratio: R / C
+    function _getReserveRatio(uint256 reserveBalance) internal pure returns (uint256) {
+        return (reserveBalance * BASE) / TEAM_COUNT;
+    }
+
+    // Helper function to get demand factor: 1 + F * S / C - G * E / C
+    function _getDemandFactor() internal view returns (uint256) {
+        return BASE + playoffDemandFactor * totalPlayoffTeams * BASE / TEAM_COUNT - eliminationDemandFactor * totalEliminatedTeams * BASE / TEAM_COUNT;
+    }
+
+    // Helper function to get fee factor: 1 + TF * TR / T + CF * CR / T
+    function _getFeeFactor() internal view returns (uint256) {
+        return BASE + transactionFee * totalRevenueFromTransactionFees * BASE / totalSupply() + unstakeFee * totalRevenueFromClaimFees * BASE / totalSupply();
+    }
+
+    // Helper function to get treasury transaction factor: 1 + TF * Tm / Gm
+    function _getTreasuryTransactionFactor() internal pure returns (uint256) {
+        uint256 Tm = GAMES_IN_SEASON * TEAM_COUNT;  // Assuming playoffs operate in a separate contract for simplification
+        return BASE + transactionFee * Tm * BASE / GAMES_IN_SEASON;
+    }
+
+    // Main function to calculate price based on formula: P = (V / T) * (W / (W + L)) * (R / C) * (1 + F * S / C - G * E / C) * (1 + TF * TR / T + CF * CR / T) * (1 + TF * Tm / Gm)
+    function _calculatePrice(uint256 tradingVolume, uint256 reserveBalance) internal view returns (uint256) {
+        uint256 winRatio = _getWinRatio();
+        uint256 reserveRatio = _getReserveRatio(reserveBalance);
+        uint256 demandFactor = _getDemandFactor();
+        uint256 feeFactor = _getFeeFactor();
+        uint256 treasuryTransactionFactor = _getTreasuryTransactionFactor();
+
+        uint256 price = (tradingVolume * BASE / totalSupply())
+                      * winRatio
+                      * reserveRatio
+                      * demandFactor
+                      * feeFactor
+                      * treasuryTransactionFactor
+                      / (BASE * BASE * BASE * BASE * BASE);  // Dividing by BASE^5 to correct for the five multiplications above
+
+        return price;
     }
 // Update token price
         uint256 newPrice = _calculatePrice(totalTradingVolume, globalTreasury - totalTradingVolume);
